@@ -1,0 +1,123 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: demo-app
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest -v
+
+  build-push:
+    name: Build and push image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      commit_sha: ${{ steps.vars.outputs.commit_sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute image variables
+        id: vars
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ghcr.io/${{ steps.vars.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:latest \
+            -t ghcr.io/${{ steps.vars.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }} \
+            .
+
+      - name: Push images
+        run: |
+          docker push ghcr.io/${{ steps.vars.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:latest
+          docker push ghcr.io/${{ steps.vars.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}
+
+  trigger-deploy:
+    name: Trigger orchestrator deploy
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send signed webhook with retry
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
+          COMMIT_SHA: ${{ needs.build-push.outputs.commit_sha }}
+          REF: ${{ github.ref }}
+        run: |
+          BODY=$(printf '{"image_tag":"%s","commit_sha":"%s","ref":"%s"}' "$IMAGE_TAG" "$COMMIT_SHA" "$REF")
+
+          SIGNATURE=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+
+          MAX_RETRIES=5
+          ATTEMPT=1
+          SUCCESS=0
+
+          while [ $ATTEMPT -le $MAX_RETRIES ]; do
+            echo "Attempt $ATTEMPT/$MAX_RETRIES: sending webhook to ${WEBHOOK_URL}/webhook"
+
+            HTTP_CODE=$(curl -s -o /tmp/webhook_response.txt -w "%{http_code}" \
+              -X POST "${WEBHOOK_URL}/webhook" \
+              -H "Content-Type: application/json" \
+              -H "X-Hub-Signature-256: sha256=${SIGNATURE}" \
+              -d "$BODY")
+
+            echo "Response HTTP code: $HTTP_CODE"
+            cat /tmp/webhook_response.txt || true
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Webhook accepted."
+              SUCCESS=1
+              break
+            elif [ "$HTTP_CODE" = "503" ]; then
+              echo "Received 503 (follower node), retrying..."
+            else
+              echo "Unexpected HTTP code $HTTP_CODE, failing definitively."
+              exit 1
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 3
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "Webhook did not succeed after $MAX_RETRIES attempts."
+            exit 1
+          fi
