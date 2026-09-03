@@ -22,3 +22,9 @@ def health():
 @app.get("/ready")
 def ready():
     return {"status": "ready"}
+
+@app.get("/compute/{n}")
+def compute(n: int):
+    if n < 0:
+        return {"error": "n must be >= 0"}
+    return {"n": n, "sum": n * (n + 1) // 2}
