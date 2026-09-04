@@ -8,7 +8,7 @@ app = FastAPI(title="Demo App", version=os.getenv("APP_VERSION", "v1"))
 @app.get("/")
 def root():
     return {
-        "message": "Hello from demo-app",
+        "message": "🎉 Hello from demo-app V2 - survived node failure!",
         "version": os.getenv("APP_VERSION", "v1"),
         "pod": socket.gethostname(),
     }
