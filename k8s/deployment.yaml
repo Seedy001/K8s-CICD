@@ -24,7 +24,7 @@ spec:
               app: demo-app
       containers:
         - name: demo-app
-          image: ghcr.io/seedy001/k8s-cicd:e70789f
+          image: ghcr.io/seedy001/k8s-cicd:a5d46de
           ports:
             - containerPort: 8000
           env:
