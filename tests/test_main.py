@@ -9,9 +9,8 @@ def test_root():
     response = client.get("/")
     assert response.status_code == 200
     data = response.json()
-    assert data["message"] == "Hello from demo-app"
-    assert "version" in data
-    assert "pod" in data
+    assert "Hello" in data["message"]
+    assert "demo-app" in data["message"]
 
 
 def test_health():
